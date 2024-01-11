@@ -1,0 +1,309 @@
+From b7f7e5dfc1e441fb443837b9a95a70fca1df7fb1 Mon Sep 17 00:00:00 2001
+From: Neal Gompa <ngompa@centosproject.org>
+Date: Fri, 14 Oct 2022 06:34:43 -0400
+Subject: [PATCH] meson: Revert upgrade to Meson 0.62
+
+Red Hat Enterprise Linux 9 is currently stuck at Meson 0.58,
+with a rebase to Meson 0.62 not expected anytime soon.
+---
+ data/meson.build                  | 49 ++++++++++++++++++++++++-----
+ data/translate-metainfo.py        | 51 +++++++++++++++++++++++++++++++
+ docs/api/compose/meson.build      | 18 ++++++-----
+ docs/api/meson.build              | 18 ++++++-----
+ docs/meson.build                  | 38 +++++++++++++++++------
+ meson.build                       |  2 +-
+ po/meson.build                    | 18 ++++++++++-
+ tests/ci/Dockerfile-debian-stable |  3 --
+ 8 files changed, 158 insertions(+), 39 deletions(-)
+ create mode 100755 data/translate-metainfo.py
+
+diff --git a/data/meson.build b/data/meson.build
+index aea0cb2..53f31cb 100644
+--- a/data/meson.build
++++ b/data/meson.build
+@@ -17,14 +17,47 @@ metainfo_with_relinfo = custom_target('gen-output',
+     command : [ascli_exe, 'news-to-metainfo', '--limit=6', '@INPUT0@', '@INPUT1@', '@OUTPUT@']
+ )
+ 
+-metainfo_i18n = i18n.itstool_join(
+-    input:  metainfo_with_relinfo,
+-    output: 'org.freedesktop.appstream.cli.metainfo.xml',
+-    mo_targets: i18n_result[0],
+-    its_files: [join_paths(meson.current_source_dir(), 'its', 'metainfo.its')],
+-    install: true,
+-    install_dir: metainfo_dir,
+-)
++if meson.version().version_compare('>=0.60')
++    # starting with Meson 0.60 we can use a crazy hack to generate sane output data
++    # using itstool - hopefully Meson will gain the ability to do this natively soon
++    itstool_exe = find_program('itstool', required: true)
++    python_exe = find_program('python3', required: true)
++
++    known_locale = run_command(python_exe,
++                               '-c',
++                               'print(open("'
++                                    + join_paths(source_root, 'po', 'LINGUAS') +
++                                    '", "r", encoding="utf-8").read())',
++                               check: true).stdout().split()
++
++    metainfo_i18n = custom_target('metainfo-i18n',
++        input : [metainfo_with_relinfo, i18n_result[0]],
++        output : 'org.freedesktop.appstream.cli.metainfo.xml',
++        command : [python_exe,
++                join_paths(meson.current_source_dir(), 'translate-metainfo.py'),
++                itstool_exe,
++                '@INPUT0@',
++                '@OUTPUT@',
++                'appstream',
++                join_paths(meson.current_source_dir(), 'its', 'metainfo.its'),
++                join_paths(meson.project_build_root(), 'po'),
++                known_locale,
++        ],
++        install: true,
++        install_dir: metainfo_dir
++    )
++else
++    # generates XML with mangled description markup tags, but better than nothing...
++    metainfo_i18n = i18n.merge_file (
++        input:  metainfo_with_relinfo,
++        output: 'org.freedesktop.appstream.cli.metainfo.xml',
++        type: 'xml',
++        data_dirs: [meson.current_source_dir()],
++        po_dir: join_paths (source_root, 'po'),
++        install: true,
++        install_dir: metainfo_dir
++    )
++endif
+ 
+ test('as-validate_metainfo.cli',
+     ascli_exe,
+diff --git a/data/translate-metainfo.py b/data/translate-metainfo.py
+new file mode 100755
+index 0000000..db85882
+--- /dev/null
++++ b/data/translate-metainfo.py
+@@ -0,0 +1,51 @@
++#!/usr/bin/env python3
++#
++# Copyright (C) 2021-2022 Matthias Klumpp <mak@debian.org>
++#
++# SPDX-License-Identifier: LGPL-2.1+
++
++#
++# This is a hack around msgfmt ignoring inline markup tags, and Meson not
++# having itstool integration in old versions.
++# FIXME: This is a terrible workaround that should go away as soon as possible.
++#
++
++import os
++import sys
++import shutil
++import subprocess
++
++
++def main(args):
++    itstool_exe = args[0]
++    input_fname = args[1]
++    output_fname = args[2]
++    domain = args[3]
++    its_fname = args[4]
++    locale_dir = args[5]
++
++    temp_mo_dir = output_fname + '.mo'
++    shutil.rmtree(temp_mo_dir, ignore_errors=True)
++    os.makedirs(temp_mo_dir, exist_ok=True)
++
++    mo_files = []
++    for locale in args[6:]:
++        locale = locale.strip()
++        mo_src = os.path.join(locale_dir, locale, 'LC_MESSAGES', domain + '.mo')
++        mo_dst = os.path.join(temp_mo_dir, locale + '.mo')
++        shutil.copy(mo_src, mo_dst, follow_symlinks=False)
++        mo_files.append(mo_dst)
++
++    cmd = [itstool_exe,
++            '-i', its_fname,
++            '-j', input_fname,
++            '-o', output_fname]
++    cmd.extend(mo_files)
++    subprocess.run(cmd, check=True)
++
++    # cleanup
++    shutil.rmtree(temp_mo_dir, ignore_errors=True)
++
++
++if __name__ == '__main__':
++    main(sys.argv[1:])
+diff --git a/docs/api/compose/meson.build b/docs/api/compose/meson.build
+index ca1d8b3..6c2300c 100644
+--- a/docs/api/compose/meson.build
++++ b/docs/api/compose/meson.build
+@@ -14,11 +14,13 @@ glib.gtkdoc (
+     install_dir: join_paths(get_option('prefix'), as_composeapi_doc_target_dir) # requires an absolute path
+ )
+ 
+-# we need to install the empty dir, as the gtkdoc generation happens last
+-# and a symlink target must exist first.
+-install_emptydir(join_paths(get_option('prefix'), as_composeapi_doc_target_dir))
+-install_symlink(
+-    'appstream-compose',
+-    pointing_to: '..' / '..' / '..' / as_composeapi_doc_target_dir,
+-    install_dir: gtk_doc_root
+-)
++if meson.version().version_compare('>=0.61')
++    # we need to install the empty dir, as the gtkdoc generation happens last
++    # and a symlink target must exist first.
++    install_emptydir(join_paths(get_option('prefix'), as_composeapi_doc_target_dir))
++    install_symlink(
++        'appstream-compose',
++        pointing_to: '..' / '..' / '..' / as_composeapi_doc_target_dir,
++        install_dir: gtk_doc_root
++    )
++endif
+diff --git a/docs/api/meson.build b/docs/api/meson.build
+index 6053c4a..ec06ab4 100644
+--- a/docs/api/meson.build
++++ b/docs/api/meson.build
+@@ -19,14 +19,16 @@ glib.gtkdoc (
+ # We hardcore the gtk-doc path here, because gtkdoc_html_dir('appstream') creates a
+ # wrong path due to a Meson bug at the moment
+ gtk_doc_root = join_paths(get_option('prefix'), get_option('datadir'), 'gtk-doc', 'html')
+-# we need to install the empty dir, as the gtkdoc generation happens last
+-# and a symlink target must exist first.
+-install_emptydir(join_paths(get_option('prefix'), as_api_doc_target_dir))
+-install_symlink(
+-    'appstream',
+-    pointing_to: '..' / '..' / '..' / as_api_doc_target_dir,
+-    install_dir: gtk_doc_root
+-)
++if meson.version().version_compare('>=0.61')
++    # we need to install the empty dir, as the gtkdoc generation happens last
++    # and a symlink target must exist first.
++    install_emptydir(join_paths(get_option('prefix'), as_api_doc_target_dir))
++    install_symlink(
++        'appstream',
++        pointing_to: '..' / '..' / '..' / as_api_doc_target_dir,
++        install_dir: gtk_doc_root
++    )
++endif
+ 
+ #
+ # Build API documentation for libappstream-compose,
+diff --git a/docs/meson.build b/docs/meson.build
+index 15ad472..e8fc381 100644
+--- a/docs/meson.build
++++ b/docs/meson.build
+@@ -120,11 +120,20 @@ if get_option('docs')
+ 
+     if get_option('install-docs')
+         install_subdir('html', install_dir: as_doc_target_dir)
+-        if fs.is_file(hljs_installed_file)
+-            install_symlink(
+-                'highlight.min.js',
+-                pointing_to: hljs_installed_file,
+-                install_dir: join_paths(get_option('prefix'), as_doc_target_dir, 'html', 'static', 'js')
++
++        if meson.version().version_compare('>=0.61')
++            if fs.is_file(hljs_installed_file)
++                install_symlink(
++                    'highlight.min.js',
++                    pointing_to: hljs_installed_file,
++                    install_dir: join_paths(get_option('prefix'), as_doc_target_dir, 'html', 'static', 'js')
++                )
++            endif
++        else
++            meson.add_install_script('sh', '-c',
++                          'if [ -f "@0@" ]; then mkdir -p $DESTDIR/@1@ && ln -sf @0@ $DESTDIR/@1@; fi'
++                          .format(hljs_installed_file,
++                                  join_paths(get_option('prefix'), as_doc_target_dir, 'html', 'static', 'js'))
+             )
+         endif
+     endif
+@@ -141,11 +150,20 @@ elif get_option('install-docs')
+     if fs.is_dir(join_paths(meson.current_source_dir(), 'html'))
+         # install documentation, if it exists
+         install_subdir('html', install_dir: as_doc_target_dir)
+-        if fs.is_file(hljs_installed_file)
+-            install_symlink(
+-                'highlight.min.js',
+-                pointing_to: hljs_installed_file,
+-                install_dir: join_paths(get_option('prefix'), as_doc_target_dir, 'html', 'static', 'js')
++
++        if meson.version().version_compare('>=0.61')
++            if fs.is_file(hljs_installed_file)
++                install_symlink(
++                    'highlight.min.js',
++                    pointing_to: hljs_installed_file,
++                    install_dir: join_paths(get_option('prefix'), as_doc_target_dir, 'html', 'static', 'js')
++                )
++            endif
++        else
++            meson.add_install_script('sh', '-c',
++                          'if [ -f "@0@" ]; then mkdir -p $DESTDIR/@1@ && ln -sf @0@ $DESTDIR/@1@; fi'
++                          .format(hljs_installed_file,
++                                  join_paths(get_option('prefix'), as_doc_target_dir, 'html', 'static', 'js'))
+             )
+         endif
+     endif
+diff --git a/meson.build b/meson.build
+index 0849b05..3504554 100644
+--- a/meson.build
++++ b/meson.build
+@@ -1,5 +1,5 @@
+ project('AppStream', 'c',
+-  meson_version: '>=0.62',
++  meson_version: '>=0.56',
+   default_options: ['c_std=c11', 'cpp_std=gnu++14'],
+ 
+   license: 'LGPL-2.1+',
+diff --git a/po/meson.build b/po/meson.build
+index e9ede19..20c68fa 100644
+--- a/po/meson.build
++++ b/po/meson.build
+@@ -1,6 +1,21 @@
+ 
+ as_gettext_domain = 'appstream'
+-i18n_result = i18n.gettext(as_gettext_domain,
++
++if meson.version().version_compare('>=0.60')
++    i18n_result = i18n.gettext(as_gettext_domain,
++        preset : 'glib',
++        data_dirs: [join_paths(source_root, 'data')],
++        args: [
++            '--default-domain=' + as_gettext_domain,
++            '--from-code=UTF-8',
++            '-i', '-F', '-c', '--no-wrap',
++            '--package-name=' + as_gettext_domain,
++            '--copyright-holder=Matthias Klumpp',
++            '--msgid-bugs-address=appstream@lists.freedesktop.org'
++        ]
++    )
++else
++i18n.gettext(as_gettext_domain,
+     preset : 'glib',
+     data_dirs: [join_paths(source_root, 'data')],
+     args: [
+@@ -12,6 +27,7 @@ i18n_result = i18n.gettext(as_gettext_domain,
+         '--msgid-bugs-address=appstream@lists.freedesktop.org'
+     ]
+ )
++endif
+ 
+ run_target ('make-linguas',
+     command: ['sh',
+diff --git a/tests/ci/Dockerfile-debian-stable b/tests/ci/Dockerfile-debian-stable
+index eb8cff4..483c8f3 100644
+--- a/tests/ci/Dockerfile-debian-stable
++++ b/tests/ci/Dockerfile-debian-stable
+@@ -10,8 +10,5 @@ RUN mkdir -p /build/ci/
+ COPY install-deps-deb.sh /build/ci/
+ RUN chmod +x /build/ci/install-deps-deb.sh && /build/ci/install-deps-deb.sh
+ 
+-RUN eatmydata apt-get install -yq --no-install-recommends python3-pip
+-RUN pip install 'meson~=0.62'
+-
+ # finish
+ WORKDIR /build
+-- 
+2.36.1
+
