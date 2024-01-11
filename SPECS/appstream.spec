@@ -4,8 +4,8 @@
 
 Summary: Utilities to generate, maintain and access the AppStream database
 Name:    appstream
-Version: 0.15.5
-Release: 2%{?dist}
+Version: 0.16.1
+Release: 1%{?dist}
 
 # lib LGPLv2+, tools GPLv2+
 License: GPLv2+ and LGPLv2+
@@ -18,11 +18,10 @@ Source0: http://www.freedesktop.org/software/appstream/releases/AppStream-%{vers
 ## upstreamable patches
 
 ## downstream patches
-Patch1001: appstream-0.15.5-downgrade-meson.patch
 
 # needed for cmake auto-provides
 BuildRequires: cmake
-BuildRequires: meson >= 0.56
+BuildRequires: meson >= 0.62
 BuildRequires: gettext
 BuildRequires: gperf
 BuildRequires: gtk-doc
@@ -38,6 +37,7 @@ BuildRequires: pkgconfig(gobject-introspection-1.0)
 BuildRequires: pkgconfig(libcurl)
 BuildRequires: pkgconfig(libsoup-2.4)
 BuildRequires: pkgconfig(librsvg-2.0)
+BuildRequires: pkgconfig(libsystemd)
 BuildRequires: pkgconfig(libxml-2.0)
 BuildRequires: pkgconfig(lmdb)
 BuildRequires: pkgconfig(packagekit-glib2)
@@ -109,13 +109,6 @@ Requires: pkgconfig(Qt5Core)
 
 %install
 %{meson_install}
-
-# create symlinks manually because with the patch to
-mkdir -p %{buildroot}/%{_datadir}/gtk-doc/html
-pushd %{buildroot}/%{_datadir}/gtk-doc/html
-ln -s ../../../share/doc/appstream/html/api appstream
-ln -s ../../../share/doc/appstream/html/compose-api appstream-compose
-popd
 
 mkdir -p %{buildroot}/var/cache/app-info/{icons,gv,xmls}
 touch %{buildroot}/var/cache/app-info/cache.watch
@@ -214,6 +207,11 @@ mv %{buildroot}%{_datadir}/metainfo/*.xml \
 %{_libdir}/libAppStreamQt.so
 
 %changelog
+* Sat Feb 11 2023 Neal Gompa <ngompa@centosproject.org> - 0.16.1-1
+- Rebase to 0.16.1
+  Resolves: rhbz#2169103
+- Drop unneeded downstream hacks to build with older Meson
+
 * Tue Nov 15 2022 Neal Gompa <ngompa@centosproject.org> - 0.15.5-2
 - Create symlinks manually to make it build
   (the symlinks were not created because of reverting the patch to
